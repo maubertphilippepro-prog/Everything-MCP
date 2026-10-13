@@ -91,6 +91,8 @@ def everything_search(
         )
     except everything_backend.EverythingError as e:
         return _error(str(e), query=query)
+    except OSError as e:
+        return _error(f"Erreur système pendant la recherche : {e}", query=query)
     out = {"query": query, "returned": len(entries), "offset": offset, "results": [e.to_dict() for e in entries]}
     if len(entries) == max_results:
         out["note"] = "Résultats tronqués : utiliser offset pour la suite ou affiner la requête."
@@ -130,7 +132,7 @@ def everything_show(
     args.append("-regex" if regex else "-noregex")
     args += ["-sort", GUI_SORTS.get(sort, "Date Modified")]
     args.append("-sort-descending" if descending else "-sort-ascending")
-    args += ["-s", query]
+    args += ["-s", everything_backend.neutralize_options(query)]
     if select:
         args += ["-select", select]
     try:
@@ -180,6 +182,8 @@ def everything_find_content(
         ))
     except (everything_backend.EverythingError, content_search.TooManyCandidates, ValueError) as e:
         return _error(str(e), query=query)
+    except OSError as e:
+        return _error(f"Erreur système pendant la recherche dans le contenu : {e}", query=query)
 
 
 @mcp.tool()
@@ -198,6 +202,8 @@ def everything_folder_info(path: str, depth: int = 1) -> str:
         return _json(folder_info_module.folder_info(path, depth))
     except (everything_backend.EverythingError, ValueError) as e:
         return _error(str(e), path=path)
+    except OSError as e:
+        return _error(f"Erreur système pendant la lecture du dossier : {e}", path=path)
 
 
 @mcp.tool()
@@ -222,13 +228,18 @@ def everything_copy(paths: list[str], destination: str, preserve_tree_from: str 
     Chaque copie est consignée dans manifest.csv (date_copie;source;copie;taille) à la racine de
     la destination.
 
-    Renvoie du JSON : copied_files, copied_bytes, copied [{source, copy, size}] (200 premiers),
-    skipped [{source, reason}], errors [{source, error}], manifest.
+    Renvoie du JSON : destination, mode, copied_files, copied_bytes, copied [{source, copy, size}]
+    (200 premiers), skipped [{source, reason}], errors [{source, error, target?}] (un `target`
+    signale une copie partielle laissée sur le disque : à signaler à l'utilisateur), warnings
+    (copie complète mais dates/attributs non conservés), manifest (chemin du journal) et
+    manifest_error (copie faite mais non consignée : à signaler).
     """
     try:
         return _json(copier.copy_items(paths, destination, preserve_tree_from))
     except copier.CopyRefused as e:
         return _error(str(e), destination=destination)
+    except OSError as e:
+        return _error(f"Copie impossible vers {destination} : {e}", destination=destination)
 
 
 if __name__ == "__main__":
