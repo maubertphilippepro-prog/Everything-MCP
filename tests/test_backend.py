@@ -1,3 +1,4 @@
+import http.client
 import json
 import subprocess
 import time
@@ -180,3 +181,76 @@ def test_es_unwritten_export_is_not_mistaken_for_results(monkeypatch):
     monkeypatch.setattr(eb.subprocess, "run", _fake_run())  # code 0 mais rien d'écrit
     with pytest.raises(eb.EverythingError, match="export"):
         eb.search("x")
+
+
+def _es_backend(monkeypatch, run=None):
+    monkeypatch.setattr(config, "BACKEND", "es")
+    if run:
+        monkeypatch.setattr(eb.subprocess, "run", run)
+
+
+def test_es_unusable_temp_dir_raises(monkeypatch):
+    _es_backend(monkeypatch)
+
+    def makedirs(*args, **kwargs):
+        raise PermissionError("refusé")
+    monkeypatch.setattr(eb.os, "makedirs", makedirs)
+    with pytest.raises(eb.EverythingError, match="temporaire"):
+        eb.search("x")
+
+
+@pytest.mark.parametrize("exc", [PermissionError("refusé"), OSError(193, "pas une application Win32")])
+def test_es_launch_oserror_is_wrapped(monkeypatch, exc):
+    def run(cmd, **kwargs):
+        raise exc
+    _es_backend(monkeypatch, run)
+    with pytest.raises(eb.EverythingError, match="pas pu être lancé"):
+        eb.search("x")
+
+
+def test_es_unreadable_export_raises(monkeypatch):
+    _es_backend(monkeypatch, _fake_run(csv_text=HEADER))
+    real_open = open
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if "es-export-" in str(path) and mode == "rb":
+            raise PermissionError("refusé")
+        return real_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr("builtins.open", fake_open)
+    with pytest.raises(eb.EverythingError, match="illisible"):
+        eb.search("x")
+
+
+def test_es_export_missing_after_run_raises(monkeypatch):
+    _es_backend(monkeypatch, _fake_run())
+    monkeypatch.setattr(eb, "_mtime", lambda path: None)
+    with pytest.raises(eb.EverythingError, match="export"):
+        eb.search("x")
+
+
+def _http_backend(monkeypatch, body):
+    monkeypatch.setattr(config, "BACKEND", "http")
+    monkeypatch.setattr(config, "HTTP_URL", "http://localhost:8080")
+    monkeypatch.setattr(eb.urllib.request, "urlopen", _fake_urlopen(body))
+
+
+def test_http_exception_is_wrapped(monkeypatch):
+    monkeypatch.setattr(config, "BACKEND", "http")
+
+    def urlopen(url, timeout=None):
+        raise http.client.RemoteDisconnected("fermé")
+    monkeypatch.setattr(eb.urllib.request, "urlopen", urlopen)
+    with pytest.raises(eb.EverythingError, match="injoignable"):
+        eb.search("x")
+
+
+def test_http_results_not_a_list_raises(monkeypatch):
+    _http_backend(monkeypatch, b'{"results": "oups"}')
+    with pytest.raises(eb.EverythingError, match="liste"):
+        eb.search("x")
+
+
+def test_http_non_dict_items_are_skipped(monkeypatch):
+    items = [1, None, {"name": "a.txt", "path": "C:\\D"}]
+    _http_backend(monkeypatch, json.dumps({"results": items}).encode("utf-8"))
+    assert [e.path for e in eb.search("x")] == ["C:\\D\\a.txt"]

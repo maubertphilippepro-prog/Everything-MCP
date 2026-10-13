@@ -1,6 +1,7 @@
 """Exécution des requêtes Everything, via es.exe (défaut) ou le serveur HTTP d'Everything."""
 
 import csv
+import http.client
 import io
 import json
 import os
@@ -140,7 +141,10 @@ def _mtime(path):
 
 
 def _search_es(query, max_results, offset, sort, descending, match_path, regex):
-    export_path = _export_path()
+    try:
+        export_path = _export_path()
+    except OSError as e:
+        raise EverythingError(f"Dossier temporaire inutilisable : {e}") from e
     cmd = es_command_line(query, max_results, offset, sort, descending, match_path, regex,
                           export_path=export_path)
     with _ES_LOCK:
@@ -150,10 +154,12 @@ def _search_es(query, max_results, offset, sort, descending, match_path, regex):
                 cmd, capture_output=True, timeout=120,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except FileNotFoundError:
-            raise EverythingError(f"es.exe introuvable : {config.ES_PATH}. Renseignez ES_PATH.")
-        except subprocess.TimeoutExpired:
-            raise EverythingError("La recherche Everything a dépassé 120 s.")
+        except FileNotFoundError as e:
+            raise EverythingError(f"es.exe introuvable : {config.ES_PATH}. Renseignez ES_PATH.") from e
+        except subprocess.TimeoutExpired as e:
+            raise EverythingError("La recherche Everything a dépassé 120 s.") from e
+        except OSError as e:
+            raise EverythingError(f"es.exe n'a pas pu être lancé ({config.ES_PATH}) : {e}") from e
 
         if proc.returncode != 0:
             err = _decode(proc.stderr or proc.stdout).strip()
@@ -162,8 +168,11 @@ def _search_es(query, max_results, offset, sort, descending, match_path, regex):
         after = _mtime(export_path)
         if after is None or after == before:
             raise EverythingError("es.exe n'a pas écrit son fichier d'export.")
-        with open(export_path, "rb") as f:
-            raw = f.read()
+        try:
+            with open(export_path, "rb") as f:
+                raw = f.read()
+        except OSError as e:
+            raise EverythingError(f"Fichier d'export es.exe illisible : {e}") from e
     return parse_es_csv(raw.decode("utf-8-sig", errors="replace"))
 
 
@@ -187,15 +196,20 @@ def _search_http(query, max_results, offset, sort, descending, match_path, regex
     try:
         with urllib.request.urlopen(url, timeout=120) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         raise EverythingError(f"Serveur HTTP Everything injoignable ({config.HTTP_URL}) : {e}") from e
     except ValueError as e:
         raise EverythingError(f"Réponse invalide du serveur HTTP Everything : {e}") from e
     if not isinstance(payload, dict):
         raise EverythingError("Réponse invalide du serveur HTTP Everything : objet JSON attendu.")
 
+    results = payload.get("results", [])
+    if not isinstance(results, list):
+        raise EverythingError("Réponse invalide du serveur HTTP Everything : « results » doit être une liste.")
     entries = []
-    for r in payload.get("results", []):
+    for r in results:
+        if not isinstance(r, dict):
+            continue
         folder, name, size = r.get("path", ""), r.get("name", ""), r.get("size")
         entries.append(Entry(
             path=f"{folder}\\{name}" if folder else name,
