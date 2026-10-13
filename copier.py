@@ -226,21 +226,36 @@ def _candidate_name(name, i, keep_ext=True):
     return f"{stem} ({i}){ext}"
 
 
-def copy_file_exclusive(source, parent, name):
-    """Copie `source` dans `parent` sous un nom libre, sans jamais écraser. Renvoie le chemin créé."""
+def copy_file_exclusive(source, parent, name, warnings=None):
+    """Copie `source` dans `parent` sous un nom libre, sans jamais écraser. Renvoie le chemin créé.
+
+    Toute erreur après la création de la cible lève PartialCopyError (cible conservée). Si seule la
+    copie des dates échoue, le contenu est complet : un avertissement est ajouté à `warnings`.
+    """
     with open(source, "rb") as src:
         for i in range(1, MAX_SUFFIX):
             target = os.path.join(parent, _candidate_name(name, i))
+            if os.path.exists(target):
+                continue
             try:
                 dst = open(target, "xb")
             except FileExistsError:
                 continue
-            with dst:
-                try:
+            except PermissionError:
+                if os.path.exists(target):  # Windows : un dossier du même nom donne PermissionError
+                    continue
+                raise
+            try:
+                with dst:
                     shutil.copyfileobj(src, dst, COPY_BUFFER)
-                except OSError as e:
-                    raise PartialCopyError(target, e) from e
-            shutil.copystat(source, target)
+            except OSError as e:
+                raise PartialCopyError(target, e) from e
+            try:
+                shutil.copystat(source, target)
+            except OSError as e:
+                if warnings is not None:
+                    warnings.append({"source": source, "target": target,
+                                     "warning": f"dates et attributs non copiés : {e}"})
             return target
     raise OSError(f"Aucun nom libre pour {name} dans {parent}")
 
@@ -260,7 +275,7 @@ def _is_our_manifest(path):
     try:
         with open(path, encoding="utf-8-sig", newline="") as f:
             return next(csv.reader(f, delimiter=";"), None) == MANIFEST_HEADER
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, csv.Error):
         return False
 
 
@@ -270,10 +285,17 @@ def _open_manifest(destination):
         path = os.path.join(destination, _candidate_name(MANIFEST_NAME, i))
         try:
             f = open(path, "x", encoding="utf-8-sig", newline="")
-            csv.writer(f, delimiter=";").writerow(MANIFEST_HEADER)
+            try:
+                csv.writer(f, delimiter=";").writerow(MANIFEST_HEADER)
+                f.flush()
+            except BaseException:
+                f.close()
+                raise
             return path, f
-        except FileExistsError:
-            if _is_our_manifest(path):
+        except (FileExistsError, PermissionError):
+            if not os.path.exists(path):
+                raise
+            if os.path.isfile(path) and _is_our_manifest(path):
                 return path, open(path, "a", encoding="utf-8", newline="")
     raise OSError("Impossible de créer le manifeste")
 
@@ -289,26 +311,34 @@ def execute(plan, max_files=None, max_bytes=None):
                           f"{human_size(max_bytes)} (EVERYTHING_COPY_MAX_BYTES). Rien n'a été copié.")
 
     result = {"destination": plan.destination, "mode": plan.mode, "copied_files": 0, "copied_bytes": 0,
-              "copied": [], "skipped": plan.skipped, "errors": [], "manifest": None}
+              "copied": [], "skipped": plan.skipped, "errors": [], "warnings": [], "manifest": None,
+              "manifest_error": None}
     if not plan.jobs and not plan.tree_dirs:
         return result
 
     os.makedirs(plan.destination, exist_ok=True)
     copied, errors = [], result["errors"]
     manifest_path, manifest = _open_manifest(plan.destination)
-    with manifest:
-        writer = csv.writer(manifest, delimiter=";")
-
+    writer = csv.writer(manifest, delimiter=";")
+    try:
         def copy_one(source, parent, name, size):
             try:
                 os.makedirs(parent, exist_ok=True)
-                target = copy_file_exclusive(source, parent, name)
-            except (OSError, PartialCopyError) as e:
+                target = copy_file_exclusive(source, parent, name, result["warnings"])
+            except PartialCopyError as e:
+                errors.append({"source": source, "error": str(e), "target": e.target})
+                return
+            except OSError as e:
                 errors.append({"source": source, "error": str(e)})
                 return
             copied.append({"source": source, "copy": target, "size": size})
-            writer.writerow([datetime.now().isoformat(timespec="seconds"), source, target, size])
-            manifest.flush()
+            try:
+                writer.writerow([datetime.now().isoformat(timespec="seconds"), source, target, size])
+                manifest.flush()
+            except (OSError, csv.Error) as e:
+                result["manifest_error"] = result["manifest_error"] or str(e)
+                errors.append({"source": source, "target": target,
+                               "error": f"copie faite mais non inscrite au manifeste : {e}"})
 
         for directory in plan.tree_dirs:
             try:
@@ -328,6 +358,11 @@ def execute(plan, max_files=None, max_bytes=None):
                 continue
             for source, rel, size in job.files:
                 copy_one(source, os.path.join(base, os.path.dirname(rel)), os.path.basename(rel), size)
+    finally:
+        try:
+            manifest.close()
+        except (OSError, csv.Error) as e:
+            result["manifest_error"] = result["manifest_error"] or str(e)
 
     result.update(copied_files=len(copied), copied_bytes=sum(c["size"] for c in copied),
                   copied=copied[:200], manifest=manifest_path)

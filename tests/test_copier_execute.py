@@ -127,3 +127,112 @@ def test_partial_copy_is_kept_and_reported(tmp_path, monkeypatch):
     out = copier.copy_items([str(a)], str(tmp_path / "out"))
     assert "copie partielle conservée" in out["errors"][0]["error"]
     assert (tmp_path / "out" / "a.txt").read_bytes() == b"012"
+
+
+def test_manifest_roundtrip_special_characters(tmp_path):
+    a = write(tmp_path / "s;rc" / "it's;a=b,name.txt", b"abc")
+    out = copier.copy_items([str(a)], str(tmp_path / "out"))
+    with open(out["manifest"], encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.reader(f, delimiter=";"))
+    assert rows[1][1] == str(a)
+    assert rows[1][2] == str(tmp_path / "out" / "it's;a=b,name.txt")
+
+
+def test_bom_written_once(tmp_path):
+    dest = tmp_path / "out"
+    copier.copy_items([str(write(tmp_path / "a.txt"))], str(dest))
+    out = copier.copy_items([str(write(tmp_path / "b.txt"))], str(dest))
+    raw = open(out["manifest"], "rb").read()
+    assert raw.startswith(b"\xef\xbb\xbf") and raw.count(b"\xef\xbb\xbf") == 1
+
+
+def test_directory_named_like_target_gives_suffix(tmp_path):
+    (tmp_path / "out" / "a.txt").mkdir(parents=True)
+    out = copier.copy_items([str(write(tmp_path / "s" / "a.txt", b"x"))], str(tmp_path / "out"))
+    assert (tmp_path / "out" / "a (2).txt").read_bytes() == b"x"
+    assert out["errors"] == []
+
+
+def test_one_error_does_not_abort_others(tmp_path, monkeypatch):
+    a = write(tmp_path / "a.txt")
+    b = write(tmp_path / "b.txt", b"bb")
+    real_open = builtins.open
+
+    def fake_open(file, mode="r", *args, **kwargs):
+        if str(file) == str(a) and "rb" in mode:
+            raise PermissionError("refusé")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    out = copier.copy_items([str(a), str(b)], str(tmp_path / "out"))
+    assert out["copied_files"] == 1 and len(out["errors"]) == 1
+    assert (tmp_path / "out" / "b.txt").read_bytes() == b"bb"
+
+
+def test_partial_copy_target_reported_in_folder_job(tmp_path, monkeypatch):
+    src = tmp_path / "src" / "D"
+    write(src / "sub" / "a.txt", b"0123456789")
+
+    def broken_copy(s, d, length=0):
+        d.write(s.read(3))
+        raise OSError("disque plein")
+
+    monkeypatch.setattr(shutil, "copyfileobj", broken_copy)
+    out = copier.copy_items([str(src)], str(tmp_path / "out"))
+    target = tmp_path / "out" / "D" / "sub" / "a.txt"
+    assert out["errors"][0]["target"] == str(target)
+    assert target.read_bytes() == b"012"
+
+
+def test_close_failure_is_partial_copy(tmp_path, monkeypatch):
+    a = write(tmp_path / "a.txt", b"abc")
+    real_copyfileobj = shutil.copyfileobj
+
+    def flaky(s, d, length=0):
+        real_copyfileobj(s, d, length)
+        d.flush = lambda: None  # le tampon sera vidé à la fermeture
+        raise OSError("flush échoué")
+
+    monkeypatch.setattr(shutil, "copyfileobj", flaky)
+    out = copier.copy_items([str(a)], str(tmp_path / "out"))
+    assert out["errors"][0]["target"] == str(tmp_path / "out" / "a.txt")
+
+
+def test_copystat_failure_is_warning(tmp_path, monkeypatch):
+    a = write(tmp_path / "a.txt", b"abc")
+
+    def bad_stat(*args, **kwargs):
+        raise OSError("stat refusé")
+
+    monkeypatch.setattr(shutil, "copystat", bad_stat)
+    out = copier.copy_items([str(a)], str(tmp_path / "out"))
+    assert out["copied_files"] == 1 and out["errors"] == []
+    assert out["warnings"][0]["target"] == str(tmp_path / "out" / "a.txt")
+    assert (tmp_path / "out" / "a.txt").read_bytes() == b"abc"
+
+
+def test_manifest_write_failure_does_not_abort(tmp_path, monkeypatch):
+    a = write(tmp_path / "a.txt", b"a")
+    b = write(tmp_path / "b.txt", b"b")
+
+    class BadWriter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def writerow(self, row):
+            raise OSError("disque plein")
+
+    real_writer = csv.writer
+    calls = []
+
+    def fake_writer(f, *args, **kwargs):
+        calls.append(1)
+        return real_writer(f, *args, **kwargs) if len(calls) == 1 else BadWriter()
+
+    monkeypatch.setattr(csv, "writer", fake_writer)
+    out = copier.copy_items([str(a), str(b)], str(tmp_path / "out"))
+    monkeypatch.undo()
+    assert out["copied_files"] == 2
+    assert out["manifest_error"] and "disque plein" in out["manifest_error"]
+    assert str(tmp_path / "out" / "a.txt") in [e["target"] for e in out["errors"]]
+    assert (tmp_path / "out" / "b.txt").read_bytes() == b"b"
