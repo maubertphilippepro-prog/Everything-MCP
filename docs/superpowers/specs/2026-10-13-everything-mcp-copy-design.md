@@ -67,9 +67,9 @@ Paramètres :
 
 Fonctionnement :
 
-1. Si `include_cloud` est faux, ajout de `!attrib:O` à la requête ; `file:` est toujours ajouté.
-2. Récupération des candidats via le backend. Au-delà de `max_candidates` : erreur explicite, aucune lecture de fichier.
-3. Pour chaque candidat : si `include_cloud` est faux, contrôle des attributs Windows (`FILE_ATTRIBUTE_OFFLINE` 0x1000, `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` 0x400000, `FILE_ATTRIBUTE_RECALL_ON_OPEN` 0x40000) ; puis extraction du texte (voir « Extraction du contenu ») et recherche de `phrase`.
+1. `file:` est ajouté à la requête.
+2. Récupération des candidats via le backend, avec leurs attributs Windows (colonne `-attributes` de es.exe). Au-delà de `max_candidates` : erreur explicite, aucune lecture de fichier.
+3. Pour chaque candidat : si `include_cloud` est faux, les fichiers dont les attributs contiennent `FILE_ATTRIBUTE_OFFLINE` 0x1000, `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` 0x400000 ou `FILE_ATTRIBUTE_RECALL_ON_OPEN` 0x40000 sont classés « en ligne uniquement » sans être ouverts. (Constaté : les fichiers OneDrive en ligne uniquement portent 0x400000 et **pas** l'attribut `O` ; `!attrib:O` serait donc inopérant. Si le backend ne fournit pas les attributs — mode HTTP —, ils sont lus par `os.stat`, qui ne déclenche pas de téléchargement.) Puis extraction du texte (voir « Extraction du contenu ») et recherche de `phrase`.
 4. Comparaison : texte normalisé en Unicode NFC, expression **exacte** (espaces non fusionnés), casse ignorée par défaut via `casefold()`.
 5. Délai global `EVERYTHING_CONTENT_TIMEOUT` (300 s) ; les fichiers restants sont listés « délai dépassé ».
 
@@ -77,7 +77,7 @@ Retour JSON :
 
 ```json
 {
-  "query": "ext:xls dm:>=2020-01-01 file: !attrib:O",
+  "query": "ext:xls dm:>=2020-01-01 file:",
   "phrase": "XYZ",
   "candidates": 120,
   "matches": [{"path": "...", "size": 37376, "modified": "2021-05-03T10:12:00", "method": "native | ifilter | raw"}],
@@ -143,7 +143,7 @@ Trois niveaux, essayés dans l'ordre ; le premier qui produit du texte est reten
 
 Pour Excel, le texte extrait place une tabulation entre cellules et un saut de ligne entre lignes : une expression sans tabulation ne peut correspondre qu'à l'intérieur d'une seule cellule.
 
-**Niveau 2 — IFilter Windows** (`method: "ifilter"`) : pour toute extension ayant un `PersistentHandler` enregistré (`.doc`, `.ppt`, `.msg`, `.rtf`, `.dwg`…, selon les logiciels installés). Appel de `LoadIFilter` puis lecture des blocs de texte (`GetChunk`/`GetText`). Aussi utilisé en secours si un lecteur natif échoue. Chaque appel est exécuté dans un processus fils avec délai (30 s par fichier) pour qu'un filtre défaillant ne bloque pas le serveur.
+**Niveau 2 — IFilter Windows** (`method: "ifilter"`) : pour toute extension ayant un `PersistentHandler` enregistré (`.doc`, `.ppt`, `.msg`, `.rtf`, `.dwg`…, selon les logiciels installés). Appel de `LoadIFilter` puis lecture des blocs de texte (`GetChunk`/`GetText`) ; les blocs signalés `FILTER_E_EMBEDDING_UNAVAILABLE` / `FILTER_E_LINK_UNAVAILABLE` (pièce jointe ou lien illisible, fréquent dans les `.msg`) sont sautés sans abandonner le fichier. Constaté sur le poste : `.rtf`, `.doc`, `.xls`, `.msg` lisibles ; filtre `.pdf` non chargeable (pypdf couvre) ; filtre `.dwg` en échec (niveau 3 prend le relais). Aussi utilisé en secours si un lecteur natif échoue. Chaque appel est exécuté dans un processus fils avec délai (30 s par fichier) pour qu'un filtre défaillant ne bloque pas le serveur.
 
 **Niveau 3 — recherche brute** (`method: "raw"`, si `allow_raw`) : recherche de l'expression dans les octets du fichier encodée en UTF-8, UTF-16LE et cp1252 ; si le fichier est une archive zip, même recherche dans chacun de ses membres décompressés. Fiabilité moindre (texte compressé ou fragmenté non trouvé), d'où le marquage.
 
@@ -163,7 +163,7 @@ Le skill synchronisé existant (`anthropic-skills:everything`, lecture seule, Cl
 
 ## Installation
 
-- Environnement virtuel `.venv` dans le dépôt ; `requirements.txt` : `mcp`, `xlrd`, `openpyxl`, `pypdf`, `comtypes`, `pytest`.
+- Environnement virtuel `.venv` dans le dépôt ; `requirements.txt` : `mcp`, `xlrd`, `openpyxl`, `pypdf`, `comtypes` ; `requirements-dev.txt` : `pytest`, `xlwt` (génération de `.xls` de test).
 - Enregistrement : `claude mcp add --scope user everything -e ES_PATH="C:\Program Files (x86)\Everything\es.exe" -- <dépôt>\.venv\Scripts\python.exe <dépôt>\server.py`.
 - README mis à jour pour Claude Code (Claude Desktop reste documenté en annexe).
 
@@ -181,7 +181,7 @@ Nouvelles : `EVERYTHING_COPY_MAX_FILES` (500), `EVERYTHING_COPY_MAX_BYTES` (2147
 - `folder_info` : backend simulé, agrégation par sous-dossier et par extension, profondeur.
 - Garde-fou statique : aucun appel interdit dans le code source.
 - `find_content` : backend simulé renvoyant des fixtures ; correspondances, non-correspondances, non vérifiés, plafond de candidats, champ `method`.
-- Intégration (marqueur `integration`, manuelle) : es.exe réel ; comportement de `!attrib:O` sur un fichier OneDrive en ligne uniquement ; IFilter `.doc`/`.msg`/`.dwg` sur des fichiers réels.
+- Intégration (marqueur `integration`, manuelle) : es.exe réel ; attributs renvoyés pour un fichier OneDrive en ligne uniquement ; IFilter `.doc`/`.msg` sur des fichiers réels.
 
 ## Hors périmètre
 
