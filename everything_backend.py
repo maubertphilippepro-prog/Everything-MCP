@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import config
 
 SORTS = ("name", "path", "size", "extension", "date-modified", "date-created")
 FILE_ATTRIBUTE_DIRECTORY = 0x10
+_ES_LOCK = threading.Lock()   # un seul fichier d'export par processus
 
 
 class EverythingError(RuntimeError):
@@ -123,12 +125,26 @@ def parse_es_csv(text):
     return entries
 
 
-def _search_es(query, max_results, offset, sort, descending, match_path, regex):
-    fd, export_path = tempfile.mkstemp(suffix=".csv", prefix="everything_mcp_")
-    os.close(fd)
+def _export_path():
+    """Fichier d'export propre au processus : c'est es.exe qui le crée et l'écrase."""
+    directory = os.path.join(tempfile.gettempdir(), "everything_mcp")
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, f"es-export-{os.getpid()}.csv")
+
+
+def _mtime(path):
     try:
-        cmd = es_command_line(query, max_results, offset, sort, descending, match_path, regex,
-                              export_path=export_path)
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _search_es(query, max_results, offset, sort, descending, match_path, regex):
+    export_path = _export_path()
+    cmd = es_command_line(query, max_results, offset, sort, descending, match_path, regex,
+                          export_path=export_path)
+    with _ES_LOCK:
+        before = _mtime(export_path)
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, timeout=120,
@@ -143,13 +159,12 @@ def _search_es(query, max_results, offset, sort, descending, match_path, regex):
             err = _decode(proc.stderr or proc.stdout).strip()
             hint = " Everything est-il lancé ?" if proc.returncode == 8 else ""
             raise EverythingError(f"es.exe a échoué (code {proc.returncode}) : {err}{hint}")
+        after = _mtime(export_path)
+        if after is None or after == before:
+            raise EverythingError("es.exe n'a pas écrit son fichier d'export.")
         with open(export_path, "rb") as f:
-            return parse_es_csv(f.read().decode("utf-8-sig", errors="replace"))
-    finally:
-        try:
-            os.remove(export_path)
-        except OSError:
-            pass
+            raw = f.read()
+    return parse_es_csv(raw.decode("utf-8-sig", errors="replace"))
 
 
 def _filetime_to_iso(ft):

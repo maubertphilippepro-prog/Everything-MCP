@@ -1,5 +1,6 @@
 import json
 import subprocess
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -72,6 +73,7 @@ def _fake_run(returncode=0, stdout=b"", stderr=b"", csv_text=None):
     """Remplace subprocess.run ; écrit csv_text dans le fichier d'export demandé."""
     def run(cmd, **kwargs):
         if csv_text is not None:
+            time.sleep(0.01)
             path = cmd.split("-export-csv ", 1)[1].split(" -utf8-bom", 1)[0].strip('"')
             with open(path, "wb") as f:
                 f.write(b"\xef\xbb\xbf" + csv_text.encode("utf-8"))
@@ -159,4 +161,22 @@ def test_http_invalid_response_raises(monkeypatch, body):
     monkeypatch.setattr(config, "HTTP_URL", "http://localhost:8080")
     monkeypatch.setattr(eb.urllib.request, "urlopen", _fake_urlopen(body))
     with pytest.raises(eb.EverythingError, match="invalide"):
+        eb.search("x")
+
+
+HEADER = "Filename,Size\r\n"
+
+
+def test_es_header_only_export_means_no_results(monkeypatch):
+    monkeypatch.setattr(config, "BACKEND", "es")
+    monkeypatch.setattr(eb.subprocess, "run", _fake_run(csv_text=HEADER))
+    assert eb.search("x") == []
+
+
+def test_es_unwritten_export_is_not_mistaken_for_results(monkeypatch):
+    monkeypatch.setattr(config, "BACKEND", "es")
+    monkeypatch.setattr(eb.subprocess, "run", _fake_run(csv_text=HEADER + '"C:\\a",1\r\n'))
+    assert len(eb.search("x")) == 1
+    monkeypatch.setattr(eb.subprocess, "run", _fake_run())  # code 0 mais rien d'écrit
+    with pytest.raises(eb.EverythingError, match="export"):
         eb.search("x")
