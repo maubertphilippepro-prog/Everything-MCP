@@ -3,7 +3,9 @@
 import csv
 import io
 import json
+import os
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -65,9 +67,12 @@ def neutralize_options(query):
 
 
 def es_command_line(query, max_results, offset=0, sort="date-modified", descending=True,
-                    match_path=False, regex=False):
+                    match_path=False, regex=False, export_path=None):
     """Ligne de commande es.exe. La requête est ajoutée brute : passée comme un seul
-    argument, es.exe la traiterait comme une expression exacte."""
+    argument, es.exe la traiterait comme une expression exacte.
+
+    Avec export_path, es.exe écrit le CSV en UTF-8 dans ce fichier : sur stdout il
+    emploie la page de code OEM de la console, qui perd les caractères hors page (œ...)."""
     args = [config.ES_PATH]
     if config.INSTANCE:
         args += ["-instance", config.INSTANCE]
@@ -75,6 +80,10 @@ def es_command_line(query, max_results, offset=0, sort="date-modified", descendi
         "-csv", "-size", "-dm", "-attributes",
         "-size-format", "1",   # tailles en octets
         "-date-format", "1",   # dates ISO-8601
+    ]
+    if export_path:
+        args += ["-export-csv", export_path, "-utf8-bom"]
+    args += [
         "-n", str(max_results),
         "-o", str(offset),
         "-sort", sort if sort in SORTS else "date-modified",
@@ -115,22 +124,32 @@ def parse_es_csv(text):
 
 
 def _search_es(query, max_results, offset, sort, descending, match_path, regex):
-    cmd = es_command_line(query, max_results, offset, sort, descending, match_path, regex)
+    fd, export_path = tempfile.mkstemp(suffix=".csv", prefix="everything_mcp_")
+    os.close(fd)
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, timeout=120,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except FileNotFoundError:
-        raise EverythingError(f"es.exe introuvable : {config.ES_PATH}. Renseignez ES_PATH.")
-    except subprocess.TimeoutExpired:
-        raise EverythingError("La recherche Everything a dépassé 120 s.")
+        cmd = es_command_line(query, max_results, offset, sort, descending, match_path, regex,
+                              export_path=export_path)
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError:
+            raise EverythingError(f"es.exe introuvable : {config.ES_PATH}. Renseignez ES_PATH.")
+        except subprocess.TimeoutExpired:
+            raise EverythingError("La recherche Everything a dépassé 120 s.")
 
-    if proc.returncode != 0:
-        err = _decode(proc.stderr or proc.stdout).strip()
-        hint = " Everything est-il lancé ?" if proc.returncode == 8 else ""
-        raise EverythingError(f"es.exe a échoué (code {proc.returncode}) : {err}{hint}")
-    return parse_es_csv(_decode(proc.stdout))
+        if proc.returncode != 0:
+            err = _decode(proc.stderr or proc.stdout).strip()
+            hint = " Everything est-il lancé ?" if proc.returncode == 8 else ""
+            raise EverythingError(f"es.exe a échoué (code {proc.returncode}) : {err}{hint}")
+        with open(export_path, "rb") as f:
+            return parse_es_csv(f.read().decode("utf-8-sig", errors="replace"))
+    finally:
+        try:
+            os.remove(export_path)
+        except OSError:
+            pass
 
 
 def _filetime_to_iso(ft):
@@ -154,7 +173,11 @@ def _search_http(query, max_results, offset, sort, descending, match_path, regex
         with urllib.request.urlopen(url, timeout=120) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except OSError as e:
-        raise EverythingError(f"Serveur HTTP Everything injoignable ({config.HTTP_URL}) : {e}")
+        raise EverythingError(f"Serveur HTTP Everything injoignable ({config.HTTP_URL}) : {e}") from e
+    except ValueError as e:
+        raise EverythingError(f"Réponse invalide du serveur HTTP Everything : {e}") from e
+    if not isinstance(payload, dict):
+        raise EverythingError("Réponse invalide du serveur HTTP Everything : objet JSON attendu.")
 
     entries = []
     for r in payload.get("results", []):
