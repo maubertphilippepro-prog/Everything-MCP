@@ -6,7 +6,7 @@ import pytest
 
 import extractors
 import ifilter
-from helpers import make_zip
+from helpers import make_pdf, make_zip
 
 
 @pytest.fixture
@@ -176,11 +176,39 @@ def test_empty_native_text_falls_through_to_ifilter(tmp_path, monkeypatch):
     assert (r.matched, r.method) == (True, "ifilter")
 
 
-def test_empty_native_text_falls_through_to_raw(tmp_path, no_ifilter):
+def test_empty_native_text_without_ifilter_is_unverified_not_raw(tmp_path, no_ifilter):
     p = tmp_path / "scan.pdf"
-    p.write_bytes(b"%PDF-1.4 not really a pdf, but has XYZ inside")
+    make_pdf(p, "")
     r = extractors.match_file(str(p), "xyz")
-    assert (r.matched, r.method) == (True, "raw")
+    assert r.matched is None and "aucun texte extrait" in r.reason
+
+
+def test_image_only_pdf_never_matches_by_chance(tmp_path, no_ifilter):
+    nl = bytes([10])
+    noise = random.Random(0).randbytes(2 * 1024 * 1024)
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+        b"<< /Length 0 >>" + nl + b"stream" + nl + nl + b"endstream",
+        b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /Length %d >>" % len(noise)
+        + nl + b"stream" + nl + noise + nl + b"endstream",
+    ]
+    out = bytearray(b"%PDF-1.4" + nl)
+    offsets = []
+    for n, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj" % n + nl + body + nl + b"endobj" + nl
+    xref = len(out)
+    out += b"xref" + nl + b"0 %d" % (len(objs) + 1) + nl + b"0000000000 65535 f " + nl
+    for off in offsets:
+        out += b"%010d 00000 n " % off + nl
+    out += b"trailer << /Size %d /Root 1 0 R >>" % (len(objs) + 1) + nl
+    out += b"startxref" + nl + b"%d" % xref + nl + b"%%EOF" + nl
+    p = tmp_path / "image.pdf"
+    p.write_bytes(bytes(out))
+    for phrase in ("XYZ", "A12", "B7"):
+        assert extractors.match_file(str(p), phrase).matched is None
 
 
 def test_empty_txt_file_stays_not_matching(tmp_path, no_ifilter):

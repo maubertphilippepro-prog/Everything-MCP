@@ -169,8 +169,10 @@ def plan_copy(paths, destination, preserve_tree_from=""):
         root = os.path.normpath(preserve_tree_from)
 
     plan = Plan(dest, "tree" if root else "flat")
-    folders = [os.path.normpath(p) for p in paths
-               if p and os.path.isabs(p) and not _is_link(os.path.normpath(p)) and os.path.isdir(p)]
+    # (chemin, realpath) des dossiers sources qui seront réellement copiés (en mode arborescence : dans la racine)
+    folders = [(f, os.path.realpath(f)) for f in (
+        os.path.normpath(p) for p in paths if p and os.path.isabs(p))
+        if not _is_link(f) and os.path.isdir(f) and (root is None or is_within(f, root))]
     seen = set()
     for raw in paths:
         if not raw or not os.path.isabs(raw):
@@ -181,8 +183,9 @@ def plan_copy(paths, destination, preserve_tree_from=""):
             plan.skipped.append({"source": src, "reason": "en double dans la liste"})
             continue
         seen.add(_norm(src))
-        container = next((f for f in folders if _norm(f) != _norm(src) and (
-            is_within(src, f) or is_within(os.path.realpath(src), os.path.realpath(f)))), None)
+        real_src = os.path.realpath(src)
+        container = next((f for f, real_f in folders if _norm(f) != _norm(src) and (
+            is_within(src, f) or is_within(real_src, real_f))), None)
         if container:
             plan.skipped.append({"source": src, "reason": f"déjà inclus dans {container}"})
             continue

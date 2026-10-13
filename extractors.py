@@ -230,7 +230,7 @@ def _raw_search(path, phrase, case_sensitive):
         if _stream_contains(f, needle, case_sensitive, config.RAW_LIMIT):
             return True, truncated
         f.seek(0)
-        if f.read(4) != b"PK":
+        if f.read(4) != b"PK\x03\x04":
             return False, truncated
     try:
         with zipfile.ZipFile(path) as z:
@@ -263,7 +263,7 @@ def raw_contains(path, phrase, case_sensitive):
 
 
 PARTIAL_REASON = "lu partiellement (plafond atteint)"
-NO_TEXT_REASON = "aucun texte extrait (PDF scanné ?)"
+NO_TEXT_REASON = "aucun texte extrait (document scanné ou images seules ?)"
 
 
 def _native_truncated(path, text):
@@ -289,7 +289,7 @@ def match_file(path, phrase, case_sensitive=False, allow_raw=True):
             is_text_file = os.path.splitext(path)[1].lower() in TEXT_EXTS
             if text.strip() or is_text_file or os.path.getsize(path) == 0:
                 return MatchResult(False, "native")
-            native_empty = True  # PDF scanné, classeur d'images… : le lecteur n'a rien vu, on insiste
+            native_empty = True  # PDF scanné, classeur d'images… : IFilter (OCR éventuel), jamais de recherche brute
             errors.append("lecteur natif : aucun texte")
     except ProtectedFile as e:
         return MatchResult(None, None, f"protégé par mot de passe : {e}")
@@ -305,17 +305,15 @@ def match_file(path, phrase, case_sensitive=False, allow_raw=True):
         except ifilter.IFilterError as e:
             errors.append(f"IFilter : {e}")
 
+    if native_empty:  # le contenu compressé ferait des faux positifs en recherche brute
+        return MatchResult(None, None, NO_TEXT_REASON)
     if not allow_raw:
         detail = "; ".join(errors)
-        if native_empty:
-            return MatchResult(None, None, NO_TEXT_REASON)
         return MatchResult(None, None, "aucun lecteur (recherche brute désactivée)" + (f" — {detail}" if detail else ""))
     try:
         found, truncated = _raw_search(path, phrase, case_sensitive)
         if found:
             return MatchResult(True, "raw")
-        if native_empty:
-            return MatchResult(None, None, NO_TEXT_REASON)
         if truncated:
             return MatchResult(None, "raw", PARTIAL_REASON)
         return MatchResult(False, "raw")

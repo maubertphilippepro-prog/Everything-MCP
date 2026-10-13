@@ -208,3 +208,11 @@ def test_folder_listed_after_its_contents_still_wins(tmp_path):
     plan = copier.plan_copy([str(f), str(src)], str(tmp_path / "out"))
     assert plan.file_count == 1
     assert plan.skipped[0]["source"] == str(f) and "déjà inclus" in plan.skipped[0]["reason"]
+
+
+def test_container_outside_tree_root_does_not_suppress_inner_files(tmp_path):
+    c = tmp_path / "C"
+    f = write(c / "Martin" / "f.xls")
+    plan = copier.plan_copy([str(c), str(f)], str(tmp_path / "out"), preserve_tree_from=str(c / "Martin"))
+    assert plan.file_count == 1
+    assert [s["reason"] for s in plan.skipped] == ["hors de la racine preserve_tree_from"]
