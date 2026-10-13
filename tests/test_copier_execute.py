@@ -236,3 +236,19 @@ def test_manifest_write_failure_does_not_abort(tmp_path, monkeypatch):
     assert out["manifest_error"] and "disque plein" in out["manifest_error"]
     assert str(tmp_path / "out" / "a.txt") in [e["target"] for e in out["errors"]]
     assert (tmp_path / "out" / "b.txt").read_bytes() == b"b"
+
+
+def test_tree_mode_does_not_write_through_destination_junction(tmp_path):
+    import subprocess
+    root = tmp_path / "root"
+    src = write(root / "sub" / "f.txt", b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    elsewhere = tmp_path / "ailleurs"
+    elsewhere.mkdir()
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(out / "sub"), str(elsewhere)],
+                   check=True, capture_output=True)
+    res = copier.copy_items([str(src)], str(out), preserve_tree_from=str(root))
+    assert list(elsewhere.iterdir()) == []
+    assert res["copied_files"] == 0
+    assert "hors de la destination" in res["errors"][0]["error"]

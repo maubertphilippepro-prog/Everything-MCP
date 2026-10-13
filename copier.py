@@ -28,12 +28,51 @@ def is_within(path, parent):
     return p == q or p.startswith(q.rstrip("\\") + "\\")
 
 
+_KNOWN_FOLDERS = (  # GUID des FOLDERID
+    "{F38BF404-1D43-42F2-9305-67DE0B28FC23}",  # Windows
+    "{905E63B6-C1BF-494E-B29C-65B732D3D21A}",  # ProgramFiles
+    "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}",  # ProgramFilesX86
+    "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}",  # ProgramData
+)
+
+
+def _known_folder_paths():
+    """Dossiers système selon l'API Windows (indépendants des variables d'environnement)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        get_path = ctypes.windll.shell32.SHGetKnownFolderPath
+        get_path.argtypes = [ctypes.c_char_p, wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+        ole32 = ctypes.windll.ole32
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CLSIDFromString.argtypes = [wintypes.LPCWSTR, ctypes.c_char_p]
+    except (AttributeError, OSError, ImportError):
+        return []
+    paths = []
+    for guid in _KNOWN_FOLDERS:
+        buf = ctypes.create_string_buffer(16)
+        out = ctypes.c_wchar_p()
+        try:
+            if ole32.CLSIDFromString(guid, buf) != 0 or get_path(buf, 0, None, ctypes.byref(out)) != 0:
+                continue
+            if out.value:
+                paths.append(out.value)
+        finally:
+            if out:
+                ole32.CoTaskMemFree(out)
+    return paths
+
+
 def _forbidden_roots():
-    roots = []
+    """Dossiers système interdits : API Windows, variables d'environnement, puis valeurs par défaut."""
+    roots = _known_folder_paths()
     for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
         value = os.environ.get(var)
         if value:
             roots.append(value)
+    drive = os.environ.get("SystemDrive") or "C:"
+    roots += [drive + "\\Windows", drive + "\\Program Files", drive + "\\Program Files (x86)",
+              drive + "\\ProgramData"]
     return roots
 
 
@@ -130,6 +169,8 @@ def plan_copy(paths, destination, preserve_tree_from=""):
         root = os.path.normpath(preserve_tree_from)
 
     plan = Plan(dest, "tree" if root else "flat")
+    folders = [os.path.normpath(p) for p in paths
+               if p and os.path.isabs(p) and not _is_link(os.path.normpath(p)) and os.path.isdir(p)]
     seen = set()
     for raw in paths:
         if not raw or not os.path.isabs(raw):
@@ -140,6 +181,11 @@ def plan_copy(paths, destination, preserve_tree_from=""):
             plan.skipped.append({"source": src, "reason": "en double dans la liste"})
             continue
         seen.add(_norm(src))
+        container = next((f for f in folders if _norm(f) != _norm(src) and (
+            is_within(src, f) or is_within(os.path.realpath(src), os.path.realpath(f)))), None)
+        if container:
+            plan.skipped.append({"source": src, "reason": f"déjà inclus dans {container}"})
+            continue
         if _is_link(src):
             plan.skipped.append({"source": src, "reason": "lien symbolique ou jonction non suivi"})
         elif os.path.isdir(src):
@@ -321,7 +367,19 @@ def execute(plan, max_files=None, max_bytes=None):
     manifest_path, manifest = _open_manifest(plan.destination)
     writer = csv.writer(manifest, delimiter=";")
     try:
+        real_dest = os.path.realpath(plan.destination)
+
+        def outside_destination(path, source):
+            """Refuse d'écrire dans un dossier qui, via une jonction, sort de la destination."""
+            if is_within(os.path.realpath(path), real_dest):
+                return False
+            errors.append({"source": source,
+                           "error": f"dossier de destination hors de la destination (jonction ?) : {path}"})
+            return True
+
         def copy_one(source, parent, name, size):
+            if outside_destination(parent, source):
+                return
             try:
                 os.makedirs(parent, exist_ok=True)
                 target = copy_file_exclusive(source, parent, name, result["warnings"])
@@ -341,6 +399,8 @@ def execute(plan, max_files=None, max_bytes=None):
                                "error": f"copie faite mais non inscrite au manifeste : {e}"})
 
         for directory in plan.tree_dirs:
+            if outside_destination(directory, directory):
+                continue
             try:
                 os.makedirs(directory, exist_ok=True)
             except OSError as e:
@@ -348,6 +408,8 @@ def execute(plan, max_files=None, max_bytes=None):
         for job in plan.jobs:
             if isinstance(job, FileJob):
                 copy_one(job.source, job.parent, job.name, job.size)
+                continue
+            if outside_destination(job.parent, job.source):
                 continue
             try:
                 base = _mkdir_unique(job.parent, job.name)

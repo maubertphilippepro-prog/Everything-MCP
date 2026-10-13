@@ -177,3 +177,34 @@ def test_is_within():
     assert copier.is_within(r"C:\a", r"C:\\")
     assert copier.is_within(r"C:\\", r"C:\\")
     assert not copier.is_within(r"D:\a", r"C:\\")
+
+
+def test_system_folders_forbidden_without_env_vars(monkeypatch):
+    for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "SystemDrive"):
+        monkeypatch.delenv(var, raising=False)
+    for dest in (r"C:\Windows\x", r"C:\Program Files\x", r"C:\Program Files (x86)\x", r"C:\ProgramData\x"):
+        with pytest.raises(copier.CopyRefused, match="système"):
+            copier.plan_copy([], dest)
+
+
+def test_known_folder_api_gives_windows_dir():
+    paths = [os.path.normcase(p) for p in copier._known_folder_paths()]
+    assert os.path.normcase(os.environ["SystemRoot"]) in paths
+
+
+def test_folder_and_its_contents_not_planned_twice(tmp_path):
+    src = tmp_path / "src"
+    f = write(src / "sous" / "a.txt")
+    write(src / "b.txt")
+    plan = copier.plan_copy([str(src), str(f), str(src / "sous")], str(tmp_path / "out"),
+                            preserve_tree_from=str(tmp_path))
+    assert plan.file_count == 2
+    assert [s["reason"] for s in plan.skipped] == [f"déjà inclus dans {src}"] * 2
+
+
+def test_folder_listed_after_its_contents_still_wins(tmp_path):
+    src = tmp_path / "src"
+    f = write(src / "a.txt")
+    plan = copier.plan_copy([str(f), str(src)], str(tmp_path / "out"))
+    assert plan.file_count == 1
+    assert plan.skipped[0]["source"] == str(f) and "déjà inclus" in plan.skipped[0]["reason"]
