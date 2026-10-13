@@ -126,7 +126,7 @@ def test_corrupted_deflate_member_does_not_raise(tmp_path, no_ifilter):
     with pytest.raises(zlib.error):
         zipfile.ZipFile(p).read("a.txt")
     r = extractors.match_file(str(p), "introuvable")
-    assert isinstance(r, extractors.MatchResult)
+    assert (r.matched, r.method) == (False, "raw")
 
 
 def test_unexpected_error_in_raw_search_is_reported(tmp_path, no_ifilter, monkeypatch):
@@ -150,3 +150,13 @@ def test_raw_phrase_straddling_chunk_boundary(tmp_path, monkeypatch):
             assert extractors.raw_contains(str(p), "secret zeta", False), (enc, pad)
     z = make_zip(tmp_path / "c.zip", {"m.bin": b"." * 13 + b"code secret zeta"})
     assert extractors.raw_contains(z, "secret zeta", False)
+
+
+def test_oversized_xml_member_still_searched_natively(tmp_path, monkeypatch):
+    xml = "<w:document><w:p>code secret zeta</w:p>" + "<w:p>" + "z" * 5000 + "</w:p></w:document>"
+    p = make_zip(tmp_path / "gros.docx", {"word/document.xml": xml})
+    monkeypatch.setattr(extractors.config, "TEXT_LIMIT", 300)
+    text = extractors.native_text(p)
+    assert text and len(text) <= 300
+    r = extractors.match_file(p, "secret zeta")
+    assert (r.matched, r.method) == (True, "native")

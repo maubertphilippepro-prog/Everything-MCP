@@ -117,11 +117,15 @@ def _read_zip_xml(path, pattern):
     with zipfile.ZipFile(path) as z:
         for info in sorted((i for i in z.infolist() if rx.fullmatch(i.filename)), key=lambda i: i.filename):
             remaining = config.TEXT_LIMIT - size
-            if remaining <= 0 or info.file_size > remaining:
-                break  # plafond atteint : on ne décompresse pas ce membre
-            text = xml_to_text(z.read(info).decode("utf-8", "replace"))
+            if remaining <= 0:
+                break
+            with z.open(info) as m:
+                data = m.read(remaining)  # membre trop gros : lu jusqu'au plafond seulement
+            text = xml_to_text(data.decode("utf-8", "replace"))
             parts.append(text)
             size += len(text) + 1
+            if info.file_size > remaining:
+                break
     return "\n".join(parts)
 
 
