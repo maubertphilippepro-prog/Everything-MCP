@@ -38,8 +38,11 @@ def check_destination(destination):
     dest = os.path.normpath(destination)
     if _norm(dest) == _norm(os.path.splitdrive(dest)[0] + "\\"):
         raise CopyRefused(f"Copie à la racine d'un lecteur refusée : {dest}")
+    real = os.path.realpath(dest)
+    if _norm(real) == _norm(os.path.splitdrive(real)[0] + "\\"):
+        raise CopyRefused(f"Copie à la racine d'un lecteur refusée : {dest} (résolu en {real})")
     for root in _forbidden_roots():
-        if is_within(dest, root):
+        if is_within(dest, root) or is_within(real, os.path.realpath(root)):
             raise CopyRefused(f"Destination dans un dossier système refusée : {dest}")
     if os.path.exists(dest) and not os.path.isdir(dest):
         raise CopyRefused(f"La destination existe et n'est pas un dossier : {dest}")
@@ -98,13 +101,16 @@ def _walk_dir(top, skipped):
             continue
         for entry in entries:
             child_rel = os.path.join(rel, entry.name) if rel else entry.name
-            if entry.is_symlink() or entry.is_junction():
-                skipped.append({"source": entry.path, "reason": "lien symbolique ou jonction non suivi"})
-            elif entry.is_dir(follow_symlinks=False):
-                dirs.append(child_rel)
-                stack.append(child_rel)
-            else:
-                files.append((entry.path, child_rel, entry.stat(follow_symlinks=False).st_size))
+            try:
+                if entry.is_symlink() or entry.is_junction():
+                    skipped.append({"source": entry.path, "reason": "lien symbolique ou jonction non suivi"})
+                elif entry.is_dir(follow_symlinks=False):
+                    dirs.append(child_rel)
+                    stack.append(child_rel)
+                else:
+                    files.append((entry.path, child_rel, entry.stat(follow_symlinks=False).st_size))
+            except OSError as e:
+                skipped.append({"source": entry.path, "reason": f"illisible : {e}"})
     return files, dirs
 
 
@@ -151,11 +157,16 @@ def _plan_file(plan, src, dest, root):
     if _norm(os.path.dirname(src)) == _norm(parent):
         plan.skipped.append({"source": src, "reason": "déjà dans la destination"})
         return
-    plan.jobs.append(FileJob(src, os.path.normpath(parent), os.path.basename(src), os.path.getsize(src)))
+    try:
+        size = os.path.getsize(src)
+    except OSError as e:
+        plan.skipped.append({"source": src, "reason": f"illisible : {e}"})
+        return
+    plan.jobs.append(FileJob(src, os.path.normpath(parent), os.path.basename(src), size))
 
 
 def _plan_dir(plan, src, dest, root):
-    if is_within(dest, src):
+    if is_within(dest, src) or is_within(os.path.realpath(dest), os.path.realpath(src)):
         raise CopyRefused(
             f"La destination {dest} est à l'intérieur du dossier source {src} : copie sans fin refusée.")
     if root:
@@ -164,6 +175,9 @@ def _plan_dir(plan, src, dest, root):
             return
         rel = os.path.relpath(src, root)
         base = dest if rel == "." else os.path.join(dest, rel)
+        if _norm(base) == _norm(src) or _norm(os.path.realpath(base)) == _norm(os.path.realpath(src)):
+            plan.skipped.append({"source": src, "reason": "déjà dans la destination"})
+            return
         files, dirs = _walk_dir(src, plan.skipped)
         plan.tree_dirs.append(base)
         plan.tree_dirs += [os.path.join(base, d) for d in dirs]
@@ -173,4 +187,7 @@ def _plan_dir(plan, src, dest, root):
     else:
         files, dirs = _walk_dir(src, plan.skipped)
         name = os.path.basename(src) or src.replace(":", "").strip("\\")
+        if _norm(os.path.join(dest, name)) == _norm(src):
+            plan.skipped.append({"source": src, "reason": "déjà dans la destination"})
+            return
         plan.jobs.append(DirJob(src, dest, name, files, dirs))

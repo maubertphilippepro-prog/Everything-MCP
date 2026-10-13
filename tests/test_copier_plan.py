@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -87,3 +88,92 @@ def test_junction_not_followed(tmp_path):
     plan = copier.plan_copy([str(src)], str(tmp_path / "out"))
     assert plan.file_count == 1
     assert plan.skipped == [{"source": str(src / "lien"), "reason": "lien symbolique ou jonction non suivi"}]
+
+
+def test_tree_dir_onto_itself_skipped(tmp_path):
+    root = tmp_path / "R"
+    write(root / "B" / "f.txt")
+    plan = copier.plan_copy([str(root / "B")], str(root), preserve_tree_from=str(root))
+    assert plan.jobs == []
+    assert plan.skipped == [{"source": str(root / "B"), "reason": "déjà dans la destination"}]
+
+
+def test_flat_dir_onto_itself_skipped(tmp_path):
+    write(tmp_path / "R" / "B" / "f.txt")
+    plan = copier.plan_copy([str(tmp_path / "R" / "B")], str(tmp_path / "R"))
+    assert plan.jobs == []
+    assert [s["reason"] for s in plan.skipped] == ["déjà dans la destination"]
+
+
+def test_destination_through_junction_into_source_refused(tmp_path):
+    src = tmp_path / "src"
+    write(src / "a.txt")
+    link = tmp_path / "lien"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(src)], check=True, capture_output=True)
+    with pytest.raises(copier.CopyRefused, match="sans fin"):
+        copier.plan_copy([str(src)], str(link / "sub"))
+
+
+def test_short_name_of_system_folder_refused():
+    import ctypes
+    root = os.environ["SystemRoot"]
+    buf = ctypes.create_unicode_buffer(512)
+    assert ctypes.windll.kernel32.GetShortPathNameW(root, buf, 512)
+    short = os.path.join(os.path.dirname(buf.value), os.path.basename(buf.value), "sub")
+    with pytest.raises(copier.CopyRefused, match="système"):
+        copier.plan_copy([], short)
+
+
+def test_destination_junction_to_system_folder_refused(tmp_path):
+    link = tmp_path / "sys"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), os.environ["SystemRoot"]],
+                   check=True, capture_output=True)
+    with pytest.raises(copier.CopyRefused, match="système"):
+        copier.plan_copy([], str(link / "sub"))
+
+
+def test_stat_error_in_walk_skips_entry(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    write(src / "ok.txt")
+    write(src / "bad.txt")
+    real_scandir = os.scandir
+
+    class Bad:
+        name = "bad.txt"
+        path = str(src / "bad.txt")
+
+        def is_symlink(self):
+            raise PermissionError("refusé")
+
+    def fake(path):
+        return [e if e.name != "bad.txt" else Bad() for e in real_scandir(path)]
+
+    monkeypatch.setattr(os, "scandir", fake)
+    plan = copier.plan_copy([str(src)], str(tmp_path / "out"))
+    assert plan.file_count == 1
+    assert len(plan.skipped) == 1
+    assert plan.skipped[0]["reason"].startswith("illisible : ")
+
+
+def test_getsize_error_skips_file(tmp_path, monkeypatch):
+    a = write(tmp_path / "a.txt")
+
+    def boom(p):
+        raise OSError("boum")
+
+    monkeypatch.setattr(os.path, "getsize", boom)
+    plan = copier.plan_copy([str(a)], str(tmp_path / "out"))
+    assert plan.jobs == []
+    assert plan.skipped[0]["reason"] == "illisible : boum"
+
+
+def test_is_within():
+    assert copier.is_within(r"C:\a\b", r"C:\a")
+    assert copier.is_within(r"C:\a", r"C:\a")
+    assert not copier.is_within(r"C:\ab", r"C:\a")
+    assert copier.is_within(r"c:\A\B", r"C:\a")
+    assert copier.is_within(r"C:\a\b", r"C:\a\\")
+    assert copier.is_within(r"C:\a", r"C:\a\\")
+    assert copier.is_within(r"C:\a", r"C:\\")
+    assert copier.is_within(r"C:\\", r"C:\\")
+    assert not copier.is_within(r"D:\a", r"C:\\")
