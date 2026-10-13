@@ -26,3 +26,9 @@ def test_defaults():
     assert config.COPY_MAX_BYTES == 2 * 1024**3
     assert config.CONTENT_TIMEOUT == 300
     assert config.FOLDER_MAX_ITEMS == 500_000
+
+
+def test_env_int_rejects_non_positive(monkeypatch):
+    for value in ("0", "-4"):
+        monkeypatch.setenv("EVERYTHING_TEST_INT", value)
+        assert config.env_int("EVERYTHING_TEST_INT", 3) == 3

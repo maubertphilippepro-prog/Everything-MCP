@@ -100,7 +100,10 @@ def es_command_line(query, max_results, offset=0, sort="date-modified", descendi
 
 
 def parse_es_csv(text):
-    rows = list(csv.reader(io.StringIO(text)))
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except csv.Error as e:
+        raise EverythingError(f"Réponse d'Everything illisible (CSV invalide) : {e}") from e
     if not rows:
         return []
     header, data = rows[0], rows[1:]

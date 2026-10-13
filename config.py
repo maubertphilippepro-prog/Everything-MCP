@@ -22,9 +22,10 @@ def first_existing(candidates):
 
 def env_int(name, default):
     try:
-        return int(os.environ.get(name, ""))
+        value = int(os.environ.get(name, ""))
     except ValueError:
         return default
+    return value if value >= 1 else default
 
 
 ES_PATH = os.environ.get("ES_PATH") or first_existing(ES_CANDIDATES)

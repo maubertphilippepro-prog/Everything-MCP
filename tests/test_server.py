@@ -108,3 +108,27 @@ def test_show_missing_exe_is_reported(monkeypatch):
         raise FileNotFoundError()
     monkeypatch.setattr(subprocess, "Popen", boom)
     assert "introuvable" in json.loads(server.everything_show("foo"))["error"]
+
+
+def test_search_nul_in_query_is_reported():
+    out = json.loads(server.everything_search("a\x00b"))
+    assert "error" in out and "invalide" in out["error"]
+
+
+def test_copy_nul_in_destination_is_reported(tmp_path):
+    out = json.loads(server.everything_copy([str(tmp_path)], str(tmp_path / "x\x00y")))
+    assert "error" in out
+
+
+def test_max_candidates_is_clamped(monkeypatch):
+    seen = {}
+
+    def fake(query, phrase, **kw):
+        seen.update(kw)
+        return {"candidates": 0}
+
+    monkeypatch.setattr(server.content_search, "find_content", fake)
+    server.everything_find_content("ext:txt", "x", max_candidates=10**9)
+    assert seen["max_candidates"] == 20000
+    server.everything_find_content("ext:txt", "x", max_candidates=-5)
+    assert seen["max_candidates"] == 1

@@ -34,7 +34,7 @@ L'utilisateur tape `/everything <demande en langage naturel>`. Les outils vienne
 
 1. **Rechercher** les éléments à copier (`everything_search` ou `everything_find_content`).
 2. **Résoudre la destination** : un chemin relatif (`extract/`) se résout depuis le dossier du projet courant (répertoire de travail de Claude Code) → chemin absolu Windows.
-3. **Choisir le mode** : à plat par défaut ; `preserve_tree_from=<dossier racine>` si l'utilisateur veut « garder la structure / les sous-dossiers ».
+3. **Choisir le mode** : à plat par défaut ; `preserve_tree_from=<dossier racine>` si l'utilisateur veut « garder la structure / les sous-dossiers ». Le mode arborescence sert à des fichiers dispersés sous une racine commune ; copier un seul dossier à plat conserve déjà sa structure interne.
 4. **Présenter l'aperçu** et **attendre une confirmation explicite** :
    - nombre de fichiers et taille totale (dossiers : utiliser `everything_folder_info` pour les compter) ;
    - les 20 premiers éléments ;
@@ -45,6 +45,8 @@ L'utilisateur tape `/everything <demande en langage naturel>`. Les outils vienne
    - `errors[].target` : copie **partielle** laissée sur le disque à cet emplacement (indiquer le chemin) ;
    - `warnings` : copie complète, mais dates ou attributs non conservés ;
    - `manifest_error` : copie faite mais **non consignée** dans `manifest.csv`.
+
+Pour copier des résultats de recherche : chercher avec `file:` ou passer des dossiers entiers uniquement, jamais un dossier avec son contenu (les éléments déjà inclus dans un dossier listé sont ignorés).
 
 Des fichiers OneDrive « en ligne uniquement » dans un dossier à copier seront téléchargés : le signaler dans l'aperçu.
 

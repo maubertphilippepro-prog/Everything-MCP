@@ -52,3 +52,8 @@ def test_ifilter_on_real_files(ext):
         except ifilter.IFilterError:
             continue
     pytest.fail(f"aucun des {min(len(local), 10)} premiers .{ext} n'a pu être lu par son IFilter")
+
+
+def test_quote_breaking_query_cannot_export(tmp_path):
+    everything_backend.search(f'\\" -export-csv {tmp_path}\\x.csv "', max_results=5)
+    assert list(tmp_path.iterdir()) == []

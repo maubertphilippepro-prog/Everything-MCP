@@ -28,7 +28,7 @@ Avant toute copie, Claude montre un aperçu et attend votre accord.
 
 ## Installation
 
-Prérequis : Everything lancé, `es.exe` (CLI d'Everything) présent dans `C:\Program Files\Everything\` ou `C:\Program Files (x86)\Everything\`, Python 3.10+.
+Prérequis : Everything lancé, `es.exe` (CLI d'Everything) présent dans `C:\Program Files\Everything\` ou `C:\Program Files (x86)\Everything\`, Python 3.12+.
 
 ```powershell
 cd C:\Users\pmaubert\dev\everything_mcp

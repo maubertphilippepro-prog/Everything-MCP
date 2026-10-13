@@ -21,6 +21,8 @@ import folder_info as folder_info_module
 
 mcp = FastMCP("everything")
 
+MAX_CANDIDATES_CAP = 20_000  # plafond absolu de max_candidates
+
 GUI_SORTS = {
     "name": "Name", "path": "Path", "size": "Size", "extension": "Extension",
     "date-modified": "Date Modified", "date-created": "Date Created",
@@ -93,6 +95,8 @@ def everything_search(
         return _error(str(e), query=query)
     except OSError as e:
         return _error(f"Erreur système pendant la recherche : {e}", query=query)
+    except ValueError as e:
+        return _error(f"Requête invalide (caractère nul ou valeur illisible) : {e}", query=query)
     out = {"query": query, "returned": len(entries), "offset": offset, "results": [e.to_dict() for e in entries]}
     if len(entries) == max_results:
         out["note"] = "Résultats tronqués : utiliser offset pour la suite ou affiner la requête."
@@ -178,7 +182,7 @@ def everything_find_content(
     try:
         return _json(content_search.find_content(
             query, phrase, case_sensitive=case_sensitive, include_cloud=include_cloud,
-            allow_raw=allow_raw, max_candidates=max(1, int(max_candidates)),
+            allow_raw=allow_raw, max_candidates=max(1, min(int(max_candidates), MAX_CANDIDATES_CAP)),
         ))
     except (everything_backend.EverythingError, content_search.TooManyCandidates, ValueError) as e:
         return _error(str(e), query=query)
@@ -240,6 +244,8 @@ def everything_copy(paths: list[str], destination: str, preserve_tree_from: str 
         return _error(str(e), destination=destination)
     except OSError as e:
         return _error(f"Copie impossible vers {destination} : {e}", destination=destination)
+    except ValueError as e:
+        return _error(f"Chemin invalide (caractère nul ?) : {e}", destination=destination)
 
 
 if __name__ == "__main__":

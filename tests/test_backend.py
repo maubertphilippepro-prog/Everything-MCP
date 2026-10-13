@@ -254,3 +254,8 @@ def test_http_non_dict_items_are_skipped(monkeypatch):
     items = [1, None, {"name": "a.txt", "path": "C:\\D"}]
     _http_backend(monkeypatch, json.dumps({"results": items}).encode("utf-8"))
     assert [e.path for e in eb.search("x")] == ["C:\\D\\a.txt"]
+
+
+def test_parse_es_csv_wraps_csv_error():
+    with pytest.raises(eb.EverythingError, match="illisible"):
+        eb.parse_es_csv("Filename\n" + "x" * 200_000 + "\n")
