@@ -1,3 +1,7 @@
+import random
+import zipfile
+import zlib
+
 import pytest
 
 import extractors
@@ -109,3 +113,40 @@ def test_corrupt_native_falls_back_to_raw(tmp_path, no_ifilter):
 def test_unreadable_file_is_unverified(tmp_path, no_ifilter):
     r = extractors.match_file(str(tmp_path / "absent.bin"), "XYZ")
     assert r.matched is None and "lecture" in r.reason
+
+
+def test_corrupted_deflate_member_does_not_raise(tmp_path, no_ifilter):
+    p = tmp_path / "bad.zip"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.txt", bytes(random.Random(1).randrange(256) for _ in range(3000)).hex() * 3)
+    raw = bytearray(p.read_bytes())
+    for i in range(36, 39):  # données compressées du membre : flux deflate invalide
+        raw[i] ^= 0xFF
+    p.write_bytes(bytes(raw))
+    with pytest.raises(zlib.error):
+        zipfile.ZipFile(p).read("a.txt")
+    r = extractors.match_file(str(p), "introuvable")
+    assert isinstance(r, extractors.MatchResult)
+
+
+def test_unexpected_error_in_raw_search_is_reported(tmp_path, no_ifilter, monkeypatch):
+    p = tmp_path / "a.bin"
+    p.write_bytes(b"xyz")
+
+    def boom(*a):
+        raise ValueError("boum")
+
+    monkeypatch.setattr(extractors, "raw_contains", boom)
+    r = extractors.match_file(str(p), "xyz")
+    assert r.matched is None and "boum" in r.reason
+
+
+def test_raw_phrase_straddling_chunk_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(extractors, "RAW_CHUNK", 16)
+    for enc in ("utf-8", "utf-16-le"):
+        for pad in range(0, 20):
+            p = tmp_path / f"c{pad}.bin"
+            p.write_bytes(b"." * pad + "code secret zeta".encode(enc) + b".....")
+            assert extractors.raw_contains(str(p), "secret zeta", False), (enc, pad)
+    z = make_zip(tmp_path / "c.zip", {"m.bin": b"." * 13 + b"code secret zeta"})
+    assert extractors.raw_contains(z, "secret zeta", False)

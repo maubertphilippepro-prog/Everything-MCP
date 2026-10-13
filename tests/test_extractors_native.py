@@ -78,3 +78,26 @@ def test_encrypted_ooxml_is_protected(tmp_path):
     p.write_bytes(extractors.OLE_MAGIC + b"\x00" * 600)
     with pytest.raises(extractors.ProtectedFile):
         extractors.native_text(str(p))
+
+
+def test_text_limit_applied_while_reading_xlsx(tmp_path, monkeypatch):
+    p = tmp_path / "big.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for i in range(2000):
+        ws.append([f"ligne numéro {i}", "x" * 20])
+    wb.save(p)
+    monkeypatch.setattr(extractors.config, "TEXT_LIMIT", 500)
+    text = extractors.native_text(str(p))
+    assert 500 < len(text) < 700
+
+
+def test_text_limit_applied_while_reading_pptx(tmp_path, monkeypatch):
+    members = {
+        f"ppt/slides/slide{i}.xml": f"<p:sld><a:p>diapo {i} " + "y" * 80 + "</a:p></p:sld>"
+        for i in range(100)
+    }
+    p = make_zip(tmp_path / "big.pptx", members)
+    monkeypatch.setattr(extractors.config, "TEXT_LIMIT", 500)
+    text = extractors.native_text(p)
+    assert 0 < len(text) <= 500

@@ -12,6 +12,7 @@ import os
 import re
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass
 
 import openpyxl
@@ -81,10 +82,14 @@ def _read_xls(path):
             raise ProtectedFile(str(e))
         raise
     try:
-        lines = []
+        lines, size = [], 0
         for sheet in book.sheets():
             for r in range(sheet.nrows):
-                lines.append("\t".join(_cell_text(v) for v in sheet.row_values(r)))
+                line = "\t".join(_cell_text(v) for v in sheet.row_values(r))
+                lines.append(line)
+                size += len(line) + 1
+                if size > config.TEXT_LIMIT:
+                    return "\n".join(lines)
         return "\n".join(lines)
     finally:
         book.release_resources()
@@ -93,10 +98,14 @@ def _read_xls(path):
 def _read_xlsx(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        lines = []
+        lines, size = [], 0
         for ws in wb.worksheets:
             for row in ws.iter_rows(values_only=True):
-                lines.append("\t".join(_cell_text(v) for v in row))
+                line = "\t".join(_cell_text(v) for v in row)
+                lines.append(line)
+                size += len(line) + 1
+                if size > config.TEXT_LIMIT:
+                    return "\n".join(lines)
         return "\n".join(lines)
     finally:
         wb.close()
@@ -104,9 +113,16 @@ def _read_xlsx(path):
 
 def _read_zip_xml(path, pattern):
     rx = re.compile(pattern)
+    parts, size = [], 0
     with zipfile.ZipFile(path) as z:
-        names = sorted(n for n in z.namelist() if rx.fullmatch(n))
-        return "\n".join(xml_to_text(z.read(n).decode("utf-8", "replace")) for n in names)
+        for info in sorted((i for i in z.infolist() if rx.fullmatch(i.filename)), key=lambda i: i.filename):
+            remaining = config.TEXT_LIMIT - size
+            if remaining <= 0 or info.file_size > remaining:
+                break  # plafond atteint : on ne décompresse pas ce membre
+            text = xml_to_text(z.read(info).decode("utf-8", "replace"))
+            parts.append(text)
+            size += len(text) + 1
+    return "\n".join(parts)
 
 
 def _read_pdf(path):
@@ -118,7 +134,14 @@ def _read_pdf(path):
             raise ProtectedFile(f"PDF chiffré : {e}")
         if not unlocked:
             raise ProtectedFile("PDF protégé par mot de passe")
-    return "\n".join((page.extract_text() or "") for page in reader.pages)
+    pages, size = [], 0
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        pages.append(text)
+        size += len(text) + 1
+        if size > config.TEXT_LIMIT:
+            break
+    return "\n".join(pages)
 
 
 def _read_text(path):
@@ -172,15 +195,36 @@ def _text_contains(data, needle, case_sensitive):
     return False
 
 
+RAW_CHUNK = 8 * 1024 * 1024         # taille des blocs de la recherche brute
+XML_PASS_LIMIT = 50 * 1024 * 1024   # au-delà, pas de passe « texte XML » sur un membre zip
+
+
+def _stream_contains(fileobj, needle, case_sensitive, limit):
+    """Recherche par blocs dans un flux d'octets (au plus `limit` octets), avec recouvrement."""
+    keep = 4 * len(needle) + 8  # assez pour contenir l'expression quel que soit l'encodage
+    tail = b""
+    total = 0
+    while total < limit:
+        chunk = fileobj.read(min(RAW_CHUNK, limit - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        buf = tail + chunk
+        if _text_contains(buf, needle, case_sensitive):
+            return True
+        tail = buf[-keep:]
+    return False
+
+
 def raw_contains(path, phrase, case_sensitive):
     """Recherche brute : octets du fichier, puis membres décompressés s'il s'agit d'un zip."""
     needle = normalize(phrase, case_sensitive)
     with open(path, "rb") as f:
-        data = f.read(config.RAW_LIMIT)
-    if _text_contains(data, needle, case_sensitive):
-        return True
-    if not data.startswith(b"PK\x03\x04"):
-        return False
+        if _stream_contains(f, needle, case_sensitive, config.RAW_LIMIT):
+            return True
+        f.seek(0)
+        if f.read(4) != b"PK\x03\x04":
+            return False
     try:
         with zipfile.ZipFile(path) as z:
             budget = config.RAW_LIMIT
@@ -189,12 +233,15 @@ def raw_contains(path, phrase, case_sensitive):
                     continue
                 budget -= info.file_size
                 try:
-                    member = z.read(info)
-                except (RuntimeError, zipfile.BadZipFile, NotImplementedError):
-                    continue  # membre chiffré ou compression non prise en charge
-                as_xml = xml_to_text(member.decode("utf-8", errors="ignore"))
-                if needle in normalize(as_xml, case_sensitive) or _text_contains(member, needle, case_sensitive):
-                    return True
+                    with z.open(info) as member:
+                        if _stream_contains(member, needle, case_sensitive, info.file_size):
+                            return True
+                    if info.file_size <= XML_PASS_LIMIT:
+                        xml = z.read(info).decode("utf-8", errors="ignore")
+                        if needle in normalize(xml_to_text(xml), case_sensitive):
+                            return True
+                except (RuntimeError, zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError):
+                    continue  # membre chiffré, corrompu, tronqué ou compression non prise en charge
     except zipfile.BadZipFile:
         pass
     return False
@@ -228,6 +275,6 @@ def match_file(path, phrase, case_sensitive=False, allow_raw=True):
         return MatchResult(None, None, "aucun lecteur (recherche brute désactivée)" + (f" — {detail}" if detail else ""))
     try:
         return MatchResult(raw_contains(path, phrase, case_sensitive), "raw")
-    except OSError as e:
+    except Exception as e:  # OSError, mais aussi tout échec inattendu sur un fichier illisible
         errors.append(str(e))
         return MatchResult(None, None, "erreur de lecture : " + "; ".join(errors))
