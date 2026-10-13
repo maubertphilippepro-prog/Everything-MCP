@@ -38,7 +38,8 @@ ZIP_XML_PARTS = {
     ".odt": r"content\.xml", ".ods": r"content\.xml", ".odp": r"content\.xml",
 }
 
-_BREAKS = re.compile(r"</(?:w:p|a:p|text:p|text:h)>|<(?:w:br|w:cr|text:line-break)\b[^>]*/>")
+_BREAKS = re.compile(r"</(?:w:p|a:p|text:p|text:h)>|<(?:w:br|w:cr|a:br|text:line-break)\b[^>]*/>")
+_HIDDEN = re.compile(r"<w:(delText|instrText)\b[^>]*>.*?</w:\1>", re.DOTALL)
 _TABS = re.compile(r"<(?:w:tab|text:tab)\b[^>]*/>")
 _SPACES = re.compile(r"<text:s\b[^>]*/>")
 _TAGS = re.compile(r"<[^>]+>")
@@ -55,6 +56,7 @@ def normalize(text, case_sensitive):
 
 def xml_to_text(xml):
     """Texte d'une partie XML Office/OpenDocument : un saut de ligne par paragraphe."""
+    xml = _HIDDEN.sub("", xml)  # texte supprimé (suivi des modifications) et codes de champs Word
     xml = _BREAKS.sub("\n", xml)
     xml = _TABS.sub("\t", xml)
     xml = _SPACES.sub(" ", xml)
@@ -220,46 +222,75 @@ def _stream_contains(fileobj, needle, case_sensitive, limit):
     return False
 
 
-def raw_contains(path, phrase, case_sensitive):
-    """Recherche brute : octets du fichier, puis membres décompressés s'il s'agit d'un zip."""
+def _raw_search(path, phrase, case_sensitive):
+    """Recherche brute : (trouvé, tronqué). `tronqué` = plafond RAW_LIMIT empêchant de tout lire."""
     needle = normalize(phrase, case_sensitive)
+    truncated = os.path.getsize(path) > config.RAW_LIMIT
     with open(path, "rb") as f:
         if _stream_contains(f, needle, case_sensitive, config.RAW_LIMIT):
-            return True
+            return True, truncated
         f.seek(0)
-        if f.read(4) != b"PK\x03\x04":
-            return False
+        if f.read(4) != b"PK":
+            return False, truncated
     try:
         with zipfile.ZipFile(path) as z:
             budget = config.RAW_LIMIT
             for info in z.infolist():
-                if info.is_dir() or info.file_size > budget:
+                if info.is_dir():
+                    continue
+                if info.file_size > budget:
+                    truncated = True
                     continue
                 budget -= info.file_size
                 try:
                     with z.open(info) as member:
                         if _stream_contains(member, needle, case_sensitive, info.file_size):
-                            return True
+                            return True, truncated
                     if info.file_size <= XML_PASS_LIMIT:
                         xml = z.read(info).decode("utf-8", errors="ignore")
                         if needle in normalize(xml_to_text(xml), case_sensitive):
-                            return True
+                            return True, truncated
                 except (RuntimeError, zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError):
                     continue  # membre chiffré, corrompu, tronqué ou compression non prise en charge
     except zipfile.BadZipFile:
         pass
-    return False
+    return False, truncated
+
+
+def raw_contains(path, phrase, case_sensitive):
+    """Recherche brute : octets du fichier, puis membres décompressés s'il s'agit d'un zip."""
+    return _raw_search(path, phrase, case_sensitive)[0]
+
+
+PARTIAL_REASON = "lu partiellement (plafond atteint)"
+NO_TEXT_REASON = "aucun texte extrait (PDF scanné ?)"
+
+
+def _native_truncated(path, text):
+    """Le texte natif a-t-il été coupé au plafond TEXT_LIMIT ?"""
+    if len(text) >= config.TEXT_LIMIT:
+        return True
+    return os.path.splitext(path)[1].lower() in TEXT_EXTS and os.path.getsize(path) > config.TEXT_LIMIT
 
 
 def match_file(path, phrase, case_sensitive=False, allow_raw=True):
     """Cherche `phrase` (expression exacte) dans le fichier, par le premier niveau qui sait le lire."""
     needle = normalize(phrase, case_sensitive)
     errors = []
+    native_empty = False
 
     try:
         text = native_text(path)
         if text is not None:
-            return MatchResult(needle in normalize(text[: config.TEXT_LIMIT], case_sensitive), "native")
+            if needle in normalize(text[: config.TEXT_LIMIT], case_sensitive):
+                return MatchResult(True, "native")
+            if _native_truncated(path, text):
+                return MatchResult(None, "native", PARTIAL_REASON)
+            is_text_file = os.path.splitext(path)[1].lower() in TEXT_EXTS
+            if text.strip() or is_text_file or os.path.getsize(path) == 0:
+                return MatchResult(False, "native")
+            native_empty = True  # PDF scanné, classeur d'images… : le lecteur n'a rien vu, on insiste
+            errors.append("lecteur natif : aucun texte")
     except ProtectedFile as e:
         return MatchResult(None, None, f"protégé par mot de passe : {e}")
     except Exception as e:
@@ -276,9 +307,18 @@ def match_file(path, phrase, case_sensitive=False, allow_raw=True):
 
     if not allow_raw:
         detail = "; ".join(errors)
+        if native_empty:
+            return MatchResult(None, None, NO_TEXT_REASON)
         return MatchResult(None, None, "aucun lecteur (recherche brute désactivée)" + (f" — {detail}" if detail else ""))
     try:
-        return MatchResult(raw_contains(path, phrase, case_sensitive), "raw")
+        found, truncated = _raw_search(path, phrase, case_sensitive)
+        if found:
+            return MatchResult(True, "raw")
+        if native_empty:
+            return MatchResult(None, None, NO_TEXT_REASON)
+        if truncated:
+            return MatchResult(None, "raw", PARTIAL_REASON)
+        return MatchResult(False, "raw")
     except Exception as e:  # OSError, mais aussi tout échec inattendu sur un fichier illisible
         errors.append(str(e))
         return MatchResult(None, None, "erreur de lecture : " + "; ".join(errors))

@@ -136,7 +136,7 @@ def test_unexpected_error_in_raw_search_is_reported(tmp_path, no_ifilter, monkey
     def boom(*a):
         raise ValueError("boum")
 
-    monkeypatch.setattr(extractors, "raw_contains", boom)
+    monkeypatch.setattr(extractors, "_raw_search", boom)
     r = extractors.match_file(str(p), "xyz")
     assert r.matched is None and "boum" in r.reason
 
@@ -160,3 +160,55 @@ def test_oversized_xml_member_still_searched_natively(tmp_path, monkeypatch):
     assert text and len(text) <= 300
     r = extractors.match_file(p, "secret zeta")
     assert (r.matched, r.method) == (True, "native")
+
+
+def test_empty_native_text_is_not_a_definitive_no_match(tmp_path, no_ifilter):
+    p = make_zip(tmp_path / "scan.docx", {"word/document.xml": "<w:document><w:p></w:p></w:document>"})
+    r = extractors.match_file(p, "xyz")
+    assert r.matched is None and "aucun texte extrait" in r.reason
+
+
+def test_empty_native_text_falls_through_to_ifilter(tmp_path, monkeypatch):
+    p = make_zip(tmp_path / "scan.docx", {"word/document.xml": "<w:document><w:p></w:p></w:document>"})
+    monkeypatch.setattr(ifilter, "has_filter", lambda ext: True)
+    monkeypatch.setattr(ifilter, "extract_text", lambda path, timeout: "texte océrisé XYZ")
+    r = extractors.match_file(p, "xyz")
+    assert (r.matched, r.method) == (True, "ifilter")
+
+
+def test_empty_native_text_falls_through_to_raw(tmp_path, no_ifilter):
+    p = tmp_path / "scan.pdf"
+    p.write_bytes(b"%PDF-1.4 not really a pdf, but has XYZ inside")
+    r = extractors.match_file(str(p), "xyz")
+    assert (r.matched, r.method) == (True, "raw")
+
+
+def test_empty_txt_file_stays_not_matching(tmp_path, no_ifilter):
+    p = tmp_path / "vide.txt"
+    p.write_bytes(b"")
+    r = extractors.match_file(str(p), "xyz")
+    assert (r.matched, r.method) == (False, "native")
+
+
+def test_native_truncation_is_signalled(tmp_path, monkeypatch):
+    p = tmp_path / "gros.txt"
+    p.write_text("a" * 200 + "\nfin xyz", encoding="utf-8")
+    monkeypatch.setattr(extractors.config, "TEXT_LIMIT", 100)
+    r = extractors.match_file(str(p), "xyz")
+    assert r.matched is None and r.method == "native" and "partiellement" in r.reason
+
+
+def test_raw_truncation_is_signalled(tmp_path, monkeypatch, no_ifilter):
+    p = tmp_path / "gros.bin"
+    p.write_bytes(b"\x00" * 200 + b"xyz")
+    monkeypatch.setattr(extractors.config, "RAW_LIMIT", 100)
+    r = extractors.match_file(str(p), "xyz")
+    assert r.matched is None and r.method == "raw" and "partiellement" in r.reason
+
+
+def test_xml_soft_break_and_hidden_word_text():
+    assert extractors.xml_to_text("<a:p><a:r><a:t>ligne un</a:t></a:r><a:br/><a:r><a:t>ligne deux</a:t></a:r></a:p>") \
+        == "ligne un\nligne deux\n"
+    xml = ("<w:p><w:r><w:t>garde</w:t></w:r><w:del><w:r><w:delText>supprimé</w:delText></w:r></w:del>"
+          "<w:r><w:instrText> PAGE MERGEFORMAT</w:instrText></w:r></w:p>")
+    assert extractors.xml_to_text(xml) == "garde\n"
