@@ -12,12 +12,14 @@ import os
 import re
 import unicodedata
 import zipfile
+from dataclasses import dataclass
 
 import openpyxl
 import xlrd
 from pypdf import PdfReader
 
 import config
+import ifilter
 
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
@@ -150,3 +152,82 @@ def native_text(path):
     if ext in TEXT_EXTS:
         return _read_text(path)
     return None
+
+
+RAW_ENCODINGS = ("utf-8", "utf-16-le", "cp1252")
+
+
+@dataclass
+class MatchResult:
+    matched: bool | None      # None = non vérifié
+    method: str | None        # "native" | "ifilter" | "raw"
+    reason: str | None = None
+
+
+def _text_contains(data, needle, case_sensitive):
+    for enc in RAW_ENCODINGS:
+        for offset in ((0, 1) if enc == "utf-16-le" else (0,)):
+            if needle in normalize(data[offset:].decode(enc, errors="ignore"), case_sensitive):
+                return True
+    return False
+
+
+def raw_contains(path, phrase, case_sensitive):
+    """Recherche brute : octets du fichier, puis membres décompressés s'il s'agit d'un zip."""
+    needle = normalize(phrase, case_sensitive)
+    with open(path, "rb") as f:
+        data = f.read(config.RAW_LIMIT)
+    if _text_contains(data, needle, case_sensitive):
+        return True
+    if not data.startswith(b"PK\x03\x04"):
+        return False
+    try:
+        with zipfile.ZipFile(path) as z:
+            budget = config.RAW_LIMIT
+            for info in z.infolist():
+                if info.is_dir() or info.file_size > budget:
+                    continue
+                budget -= info.file_size
+                try:
+                    member = z.read(info)
+                except (RuntimeError, zipfile.BadZipFile, NotImplementedError):
+                    continue  # membre chiffré ou compression non prise en charge
+                as_xml = xml_to_text(member.decode("utf-8", errors="ignore"))
+                if needle in normalize(as_xml, case_sensitive) or _text_contains(member, needle, case_sensitive):
+                    return True
+    except zipfile.BadZipFile:
+        pass
+    return False
+
+
+def match_file(path, phrase, case_sensitive=False, allow_raw=True):
+    """Cherche `phrase` (expression exacte) dans le fichier, par le premier niveau qui sait le lire."""
+    needle = normalize(phrase, case_sensitive)
+    errors = []
+
+    try:
+        text = native_text(path)
+        if text is not None:
+            return MatchResult(needle in normalize(text[: config.TEXT_LIMIT], case_sensitive), "native")
+    except ProtectedFile as e:
+        return MatchResult(None, None, f"protégé par mot de passe : {e}")
+    except Exception as e:
+        errors.append(f"lecteur natif : {e}")
+
+    if ifilter.has_filter(os.path.splitext(path)[1].lower()):
+        try:
+            text = ifilter.extract_text(path, config.IFILTER_TIMEOUT)
+            if text.strip():
+                return MatchResult(needle in normalize(text, case_sensitive), "ifilter")
+            errors.append("IFilter : aucun texte")
+        except ifilter.IFilterError as e:
+            errors.append(f"IFilter : {e}")
+
+    if not allow_raw:
+        detail = "; ".join(errors)
+        return MatchResult(None, None, "aucun lecteur (recherche brute désactivée)" + (f" — {detail}" if detail else ""))
+    try:
+        return MatchResult(raw_contains(path, phrase, case_sensitive), "raw")
+    except OSError as e:
+        errors.append(str(e))
+        return MatchResult(None, None, "erreur de lecture : " + "; ".join(errors))
