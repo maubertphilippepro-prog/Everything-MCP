@@ -46,14 +46,18 @@ def extract_text(path, timeout):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
-        raise IFilterError(f"délai de {timeout} s dépassé")
+        raise IFilterError(f"délai de {timeout} s dépassé") from None
+    except OSError as e:
+        raise IFilterError(f"lancement du processus de lecture impossible : {e}") from e
     if proc.returncode != 0:
-        message = proc.stderr.decode("utf-8", "replace").strip()
+        message = proc.stderr.decode("utf-8", "replace").strip()[:500]
         raise IFilterError(message or f"code de sortie {proc.returncode}")
     return proc.stdout.decode("utf-8", "replace")
 
 
 def _read_with_ifilter(path, limit):
+    if not os.path.isfile(path):  # LoadIFilter réussit même sur un fichier absent
+        raise FileNotFoundError(f"fichier introuvable : {path}")
     import ctypes
     from ctypes import POINTER, byref, c_int, c_ulong, wintypes
 
@@ -139,6 +143,6 @@ if __name__ == "__main__":
     try:
         text = _read_with_ifilter(sys.argv[1], config.TEXT_LIMIT)
     except Exception as e:  # tout échec du filtre est rapporté au processus parent
-        sys.stderr.write(f"{type(e).__name__}: {e}")
+        sys.stderr.buffer.write(f"{type(e).__name__}: {e}".encode("utf-8"))
         sys.exit(2)
     sys.stdout.buffer.write(text.encode("utf-8"))
